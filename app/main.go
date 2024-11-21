@@ -1,16 +1,20 @@
 package main
+
 import (
 	"bytes"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"net"
 	"strings"
 )
+
 type DNSMessage struct {
 	Header          DNSHeader
 	Questions       []DNSQuestion
 	ResourceRecords []DNSResourceRecords
 }
+
 func (dnsMessage DNSMessage) serialize() []byte {
 	buffer := []byte{}
 	buffer = append(buffer, dnsMessage.Header.serialize()...)
@@ -22,26 +26,11 @@ func (dnsMessage DNSMessage) serialize() []byte {
 	}
 	return buffer
 }
+
 func createNewDnsMessage(buffer []byte) DNSMessage {
 	query := parseHeader(buffer)
 	questions := parseQuestions(buffer, query.QDCOUNT)
 	answers := []DNSResourceRecords{}
-	for _, question := range questions {
-		answers = append(answers, DNSResourceRecords{
-			Name:     question.Name,
-			Type:     1,
-			Class:    1,
-			TTL:      0,
-			RDLength: 4,
-			RData:    []byte("\x08\x08\x08\x08"), // []byte{8, 8, 8, 8}
-		})
-	}
-	var rCode uint8
-	if query.OPCODE != 0 {
-		rCode = 4
-	} else {
-		rCode = 0
-	}
 	headers := DNSHeader{
 		ID:      query.ID,
 		QR:      1,
@@ -49,13 +38,13 @@ func createNewDnsMessage(buffer []byte) DNSMessage {
 		AA:      0,
 		TC:      0,
 		RD:      query.RD,
-		RA:      0,
+		RA:      1,
 		Z:       0,
-		RCODE:   rCode,
+		RCODE:   0,
 		QDCOUNT: uint16(len(questions)),
 		ANCOUNT: uint16(len(answers)),
-		NSCOUNT: query.NSCOUNT,
-		ARCOUNT: query.ARCOUNT,
+		NSCOUNT: 0,
+		ARCOUNT: 0,
 	}
 	return DNSMessage{
 		Header:          headers,
@@ -63,21 +52,23 @@ func createNewDnsMessage(buffer []byte) DNSMessage {
 		ResourceRecords: answers,
 	}
 }
+
 type DNSHeader struct {
-	ID      uint16 // Packet Identifier (ID): random ID assigned to query packets.
-	QR      uint8  // Query/Response Indicator (QR): 1 for a reply packet, 0 for a question packet.
-	OPCODE  uint8  // Operation Code (OPCODE): Specifies the kind of query in a message.
-	AA      uint8  // Authoritative Answer (AA): 1 if the responding server "owns" the domain queried, i.e., it's authoritative.
-	TC      uint8  // Truncation (TC): 1 if the message is larger than 512 bytes. Always 0 in UDP responses.
-	RD      uint8  // Recursion Desired (RD): Sender sets this to 1 if the server should recursively resolve this query, 0 otherwise. (expected 0)
-	RA      uint8  // Recursion Available (RA): Server sets this to 1 to indicate that recursion is available. (expected 0)
-	Z       uint8  // Reserved (Z): Used by DNSSEC queries. At inception, it was reserved for future use. (expected 0)
-	RCODE   uint8  // Response Code (RCODE): Response code indicating the status of the response. (0: no error, 1: format error, 2: server failure, 3: name error, 4: not implemented, 5: refused)
-	QDCOUNT uint16 // Question Count (QDCOUNT): num questions in the Question section (expected 0)
-	ANCOUNT uint16 // Answer Record Count (ANCOUNT): num records in the Answer section (expected 0)
-	NSCOUNT uint16 // Authority Record Count (NSCOUNT): num records in the Authority section (expected 0)
-	ARCOUNT uint16 // Additional Record Count (ARCOUNT): num records in the Additional section (expected 0)
+	ID      uint16
+	QR      uint8
+	OPCODE  uint8
+	AA      uint8
+	TC      uint8
+	RD      uint8
+	RA      uint8
+	Z       uint8
+	RCODE   uint8
+	QDCOUNT uint16
+	ANCOUNT uint16
+	NSCOUNT uint16
+	ARCOUNT uint16
 }
+
 func (header DNSHeader) serialize() []byte {
 	buffer := make([]byte, 12)
 	binary.BigEndian.PutUint16(buffer[0:2], header.ID)
@@ -89,12 +80,13 @@ func (header DNSHeader) serialize() []byte {
 	binary.BigEndian.PutUint16(buffer[10:12], header.ARCOUNT)
 	return buffer
 }
-// Only handle A-type queries
+
 type DNSQuestion struct {
 	Name  string
 	Type  uint16
 	Class uint16
 }
+
 func (question DNSQuestion) serialize() []byte {
 	buffer := []byte{}
 	labels := strings.Split(question.Name, ".")
@@ -107,7 +99,7 @@ func (question DNSQuestion) serialize() []byte {
 	buffer = append(buffer, byte(question.Class>>8), byte(question.Class))
 	return buffer
 }
-// Only handle A-type answers
+
 type DNSResourceRecords struct {
 	Name     string
 	Type     uint16
@@ -116,6 +108,7 @@ type DNSResourceRecords struct {
 	RDLength uint16
 	RData    []byte
 }
+
 func (answer DNSResourceRecords) serialize() []byte {
 	buffer := []byte{}
 	labels := strings.Split(answer.Name, ".")
@@ -131,18 +124,19 @@ func (answer DNSResourceRecords) serialize() []byte {
 	buffer = append(buffer, answer.RData...)
 	return buffer
 }
+
 func parseHeader(serializedBuf []byte) DNSHeader {
 	buffer := serializedBuf[:12]
 	header := DNSHeader{
 		ID:      binary.BigEndian.Uint16(buffer[0:2]),
 		QR:      buffer[2] >> 7,
-		OPCODE:  (buffer[2] >> 3) & 0x0F, // 0xF = 0000 1111
+		OPCODE:  (buffer[2] >> 3) & 0x0F,
 		AA:      (buffer[2] >> 2) & 0x01,
 		TC:      (buffer[2] >> 1) & 0x01,
-		RD:      buffer[2] & 0x01, // 0x1 = 0000 0001
+		RD:      buffer[2] & 0x01,
 		RA:      buffer[3] >> 7,
-		Z:       (buffer[3] >> 4) & 0x07, // 0x7 = 0000 0111
-		RCODE:   buffer[3] & 0x0F,        // 0xF = 0000 1111
+		Z:       (buffer[3] >> 4) & 0x07,
+		RCODE:   buffer[3] & 0x0F,
 		QDCOUNT: binary.BigEndian.Uint16(buffer[4:6]),
 		ANCOUNT: binary.BigEndian.Uint16(buffer[6:8]),
 		NSCOUNT: binary.BigEndian.Uint16(buffer[8:10]),
@@ -150,6 +144,7 @@ func parseHeader(serializedBuf []byte) DNSHeader {
 	}
 	return header
 }
+
 func parseLabel(buf []byte, source []byte) string {
 	offset := 0
 	labels := []string{}
@@ -162,7 +157,7 @@ func parseLabel(buf []byte, source []byte) string {
 			length := bytes.Index(source[ptr:], []byte{0})
 			labels = append(labels, parseLabel(source[ptr:ptr+length+1], source))
 			offset += 2
-			continue
+			break
 		}
 		length := int(buf[offset])
 		substring := buf[offset+1 : offset+1+length]
@@ -171,6 +166,7 @@ func parseLabel(buf []byte, source []byte) string {
 	}
 	return strings.Join(labels, ".")
 }
+
 func parseQuestions(serializedBuf []byte, numQues uint16) []DNSQuestion {
 	var questionList []DNSQuestion
 	offset := 12
@@ -179,39 +175,184 @@ func parseQuestions(serializedBuf []byte, numQues uint16) []DNSQuestion {
 		label := parseLabel(serializedBuf[offset:offset+len+1], serializedBuf)
 		questionList = append(questionList, DNSQuestion{
 			Name:  label,
-			Type:  1,
-			Class: 1,
+			Type:  binary.BigEndian.Uint16(serializedBuf[offset+len+1 : offset+len+3]),
+			Class: binary.BigEndian.Uint16(serializedBuf[offset+len+3 : offset+len+5]),
 		})
-		offset += len + 1
-		offset += 4 // 2 bytes for type, 2 bytes for class
+		offset += len + 5
 	}
 	return questionList
 }
+
+func forwardDNSQuery(query []byte, resolver string) ([]byte, error) {
+	conn, err := net.Dial("udp", resolver)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	_, err = conn.Write(query)
+	if err != nil {
+		return nil, err
+	}
+
+	response := make([]byte, 512)
+	n, err := conn.Read(response)
+	if err != nil {
+		return nil, err
+	}
+
+	return response[:n], nil
+}
+
 func main() {
+	resolver := flag.String("resolver", "", "DNS resolver address (ip:port)")
+	flag.Parse()
+
+	if *resolver == "" {
+		fmt.Println("Please provide a resolver address using --resolver flag")
+		return
+	}
+
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:2053")
 	if err != nil {
 		fmt.Println("Failed to resolve UDP address:", err)
 		return
 	}
+
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		fmt.Println("Failed to bind to address:", err)
 		return
 	}
 	defer udpConn.Close()
+
+	fmt.Println("DNS forwarder listening on 127.0.0.1:2053")
+	fmt.Println("Forwarding queries to", *resolver)
+
 	buf := make([]byte, 512)
 	for {
 		size, source, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			fmt.Println("Error receiving data:", err)
-			break
+			continue
 		}
-		receivedData := string(buf[:size])
-		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
-		response := createNewDnsMessage(buf[:size])
-		_, err = udpConn.WriteToUDP(response.serialize(), source)
+
+		go handleDNSQuery(udpConn, source, buf[:size], *resolver)
+	}
+}
+
+func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolver string) {
+	dnsMessage := createNewDnsMessage(query)
+	
+	if dnsMessage.Header.QDCOUNT > 1 {
+		// Handle multiple questions
+		responses := [][]byte{}
+		for _, question := range dnsMessage.Questions {
+			singleQuery := createSingleQuestionQuery(dnsMessage.Header, question)
+			response, err := forwardDNSQuery(singleQuery, resolver)
+			if err != nil {
+				fmt.Println("Error forwarding DNS query:", err)
+				return
+			}
+			responses = append(responses, response)
+		}
+		mergedResponse := mergeResponses(responses)
+		conn.WriteToUDP(mergedResponse, source)
+	} else {
+		// Forward single question query
+		response, err := forwardDNSQuery(query, resolver)
 		if err != nil {
-			fmt.Println("Failed to send response:", err)
+			fmt.Println("Error forwarding DNS query:", err)
+			return
 		}
+		conn.WriteToUDP(response, source)
+	}
+}
+
+func createSingleQuestionQuery(header DNSHeader, question DNSQuestion) []byte {
+	header.QDCOUNT = 1
+	dnsMessage := DNSMessage{
+		Header:    header,
+		Questions: []DNSQuestion{question},
+	}
+	return dnsMessage.serialize()
+}
+
+func mergeResponses(responses [][]byte) []byte {
+	if len(responses) == 0 {
+		return nil
+	}
+
+	mergedHeader := parseHeader(responses[0])
+	mergedHeader.QDCOUNT = 0
+	mergedHeader.ANCOUNT = 0
+
+	var mergedQuestions []DNSQuestion
+	var mergedAnswers []DNSResourceRecords
+
+	for _, response := range responses {
+		header := parseHeader(response)
+		questions := parseQuestions(response, header.QDCOUNT)
+		answers := parseAnswers(response, header.ANCOUNT)
+
+		mergedHeader.QDCOUNT += header.QDCOUNT
+		mergedHeader.ANCOUNT += header.ANCOUNT
+		mergedQuestions = append(mergedQuestions, questions...)
+		mergedAnswers = append(mergedAnswers, answers...)
+	}
+
+	mergedMessage := DNSMessage{
+		Header:          mergedHeader,
+		Questions:       mergedQuestions,
+		ResourceRecords: mergedAnswers,
+	}
+
+	return mergedMessage.serialize()
+}
+
+func parseAnswers(serializedBuf []byte, numAns uint16) []DNSResourceRecords {
+	var answerList []DNSResourceRecords
+	offset := 12 // Start after the header
+
+	// Skip questions
+	for i := uint16(0); i < parseHeader(serializedBuf).QDCOUNT; i++ {
+		for serializedBuf[offset] != 0 {
+			offset += int(serializedBuf[offset]) + 1
+		}
+		offset += 5 // 1 for null byte, 2 for TYPE, 2 for CLASS
+	}
+
+	for i := uint16(0); i < numAns; i++ {
+		name := parseLabel(serializedBuf[offset:], serializedBuf)
+		nameLength := getLabelLength(serializedBuf[offset:])
+		offset += nameLength
+
+		answer := DNSResourceRecords{
+			Name:     name,
+			Type:     binary.BigEndian.Uint16(serializedBuf[offset : offset+2]),
+			Class:    binary.BigEndian.Uint16(serializedBuf[offset+2 : offset+4]),
+			TTL:      binary.BigEndian.Uint32(serializedBuf[offset+4 : offset+8]),
+			RDLength: binary.BigEndian.Uint16(serializedBuf[offset+8 : offset+10]),
+		}
+		offset += 10
+		answer.RData = serializedBuf[offset : offset+int(answer.RDLength)]
+		offset += int(answer.RDLength)
+
+		answerList = append(answerList, answer)
+	}
+
+	return answerList
+}
+
+func getLabelLength(buf []byte) int {
+	length := 0
+	for {
+		if buf[length] == 0 {
+			return length + 1
+		}
+		if (buf[length] & 0xC0) == 0xC0 {
+			return length + 2
+		}
+		length += int(buf[length]) + 1
 	}
 }
