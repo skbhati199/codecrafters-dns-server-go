@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -13,18 +12,135 @@ type DNSMessage struct {
 	Header          DNSHeader
 	Questions       []DNSQuestion
 	ResourceRecords []DNSResourceRecords
+	serialize       func() []byte
 }
 
-func (dnsMessage DNSMessage) serialize() []byte {
+func (question DNSQuestion) serialize() []byte {
 	buffer := []byte{}
-	buffer = append(buffer, dnsMessage.Header.serialize()...)
-	for _, question := range dnsMessage.Questions {
-		buffer = append(buffer, question.serialize()...)
+	labels := strings.Split(question.Name, ".")
+	for _, label := range labels {
+		if len(label) > 63 {
+			// Truncate label if it's too long
+			label = label[:63]
+		}
+		buffer = append(buffer, byte(len(label)))
+		buffer = append(buffer, []byte(label)...)
 	}
-	for _, rr := range dnsMessage.ResourceRecords {
-		buffer = append(buffer, rr.serialize()...)
-	}
+	buffer = append(buffer, 0) // null terminator
+	buffer = append(buffer, byte(question.Type>>8), byte(question.Type))
+	buffer = append(buffer, byte(question.Class>>8), byte(question.Class))
 	return buffer
+}
+
+func parseLabel(buf []byte, offset int) (string, int) {
+	startOffset := offset
+	var labels []string
+	for {
+		if offset >= len(buf) {
+			break
+		}
+		if buf[offset] == 0 {
+			offset++
+			break
+		}
+		if (buf[offset] & 0xC0) == 0xC0 {
+			pointer := int(binary.BigEndian.Uint16(buf[offset:offset+2]) & 0x3FFF)
+			pointedName, _ := parseLabel(buf, pointer)
+			labels = append(labels, pointedName)
+			offset += 2
+			break
+		}
+		length := int(buf[offset])
+		offset++
+		if offset+length > len(buf) {
+			break
+		}
+		labels = append(labels, string(buf[offset:offset+length]))
+		offset += length
+	}
+	return strings.Join(labels, "."), offset - startOffset
+}
+
+func parseQuestions(serializedBuf []byte, numQues uint16) []DNSQuestion {
+	var questionList []DNSQuestion
+	offset := 12
+	for i := uint16(0); i < numQues; i++ {
+		name, nameLength := parseLabel(serializedBuf, offset)
+		offset += nameLength
+		if offset+4 > len(serializedBuf) {
+			break
+		}
+		questionList = append(questionList, DNSQuestion{
+			Name:  name,
+			Type:  binary.BigEndian.Uint16(serializedBuf[offset : offset+2]),
+			Class: binary.BigEndian.Uint16(serializedBuf[offset+2 : offset+4]),
+		})
+		offset += 4
+	}
+	return questionList
+}
+
+func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolver string) {
+	queryHeader := parseHeader(query)
+
+	if queryHeader.QDCOUNT > 1 {
+		// Handle multiple questions
+		responses := [][]byte{}
+		for _, question := range parseQuestions(query, queryHeader.QDCOUNT) {
+			singleQuery := createSingleQuestionQuery(queryHeader, question)
+			response, err := forwardDNSQuery(singleQuery, resolver)
+			if err != nil {
+				fmt.Println("Error forwarding DNS query:", err)
+				return
+			}
+			responses = append(responses, response)
+		}
+		mergedResponse := mergeResponses(responses, queryHeader.ID)
+		conn.WriteToUDP(mergedResponse, source)
+	} else {
+		// Forward single question query
+		response, err := forwardDNSQuery(query, resolver)
+		if err != nil {
+			fmt.Println("Error forwarding DNS query:", err)
+			return
+		}
+		// Ensure the response has the same ID as the original query
+		binary.BigEndian.PutUint16(response[:2], queryHeader.ID)
+		conn.WriteToUDP(response, source)
+	}
+}
+
+func mergeResponses(responses [][]byte, originalID uint16) []byte {
+	if len(responses) == 0 {
+		return nil
+	}
+
+	mergedHeader := parseHeader(responses[0])
+	mergedHeader.ID = originalID
+	mergedHeader.QDCOUNT = 0
+	mergedHeader.ANCOUNT = 0
+
+	var mergedQuestions []DNSQuestion
+	var mergedAnswers []DNSResourceRecords
+
+	for _, response := range responses {
+		header := parseHeader(response)
+		questions := parseQuestions(response, header.QDCOUNT)
+		answers := parseAnswers(response, header.ANCOUNT)
+
+		mergedHeader.QDCOUNT += header.QDCOUNT
+		mergedHeader.ANCOUNT += header.ANCOUNT
+		mergedQuestions = append(mergedQuestions, questions...)
+		mergedAnswers = append(mergedAnswers, answers...)
+	}
+
+	mergedMessage := DNSMessage{
+		Header:          mergedHeader,
+		Questions:       mergedQuestions,
+		ResourceRecords: mergedAnswers,
+	}
+
+	return mergedMessage.serialize()
 }
 
 func createNewDnsMessage(buffer []byte) DNSMessage {
@@ -87,19 +203,6 @@ type DNSQuestion struct {
 	Class uint16
 }
 
-func (question DNSQuestion) serialize() []byte {
-	buffer := []byte{}
-	labels := strings.Split(question.Name, ".")
-	for _, label := range labels {
-		buffer = append(buffer, byte(len(label)))
-		buffer = append(buffer, []byte(label)...)
-	}
-	buffer = append(buffer, '\x00')
-	buffer = append(buffer, byte(question.Type>>8), byte(question.Type))
-	buffer = append(buffer, byte(question.Class>>8), byte(question.Class))
-	return buffer
-}
-
 type DNSResourceRecords struct {
 	Name     string
 	Type     uint16
@@ -143,44 +246,6 @@ func parseHeader(serializedBuf []byte) DNSHeader {
 		ARCOUNT: binary.BigEndian.Uint16(buffer[10:12]),
 	}
 	return header
-}
-
-func parseLabel(buf []byte, source []byte) string {
-	offset := 0
-	labels := []string{}
-	for {
-		if buf[offset] == 0 {
-			break
-		}
-		if (buf[offset]&0xC0)>>6 == 0b11 {
-			ptr := int(binary.BigEndian.Uint16(buf[offset:offset+2]) << 2 >> 2)
-			length := bytes.Index(source[ptr:], []byte{0})
-			labels = append(labels, parseLabel(source[ptr:ptr+length+1], source))
-			offset += 2
-			break
-		}
-		length := int(buf[offset])
-		substring := buf[offset+1 : offset+1+length]
-		labels = append(labels, string(substring))
-		offset += length + 1
-	}
-	return strings.Join(labels, ".")
-}
-
-func parseQuestions(serializedBuf []byte, numQues uint16) []DNSQuestion {
-	var questionList []DNSQuestion
-	offset := 12
-	for i := uint16(0); i < numQues; i++ {
-		len := bytes.Index(serializedBuf[offset:], []byte{0})
-		label := parseLabel(serializedBuf[offset:offset+len+1], serializedBuf)
-		questionList = append(questionList, DNSQuestion{
-			Name:  label,
-			Type:  binary.BigEndian.Uint16(serializedBuf[offset+len+1 : offset+len+3]),
-			Class: binary.BigEndian.Uint16(serializedBuf[offset+len+3 : offset+len+5]),
-		})
-		offset += len + 5
-	}
-	return questionList
 }
 
 func forwardDNSQuery(query []byte, resolver string) ([]byte, error) {
@@ -307,69 +372,6 @@ func parseName(buf []byte, offset int) (string, int) {
 		offset += length + 1
 	}
 	return name, offset - startOffset
-}
-
-func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolver string) {
-	queryHeader := parseHeader(query)
-
-	if queryHeader.QDCOUNT > 1 {
-		// Handle multiple questions
-		responses := [][]byte{}
-		for _, question := range parseQuestions(query, queryHeader.QDCOUNT) {
-			singleQuery := createSingleQuestionQuery(queryHeader, question)
-			response, err := forwardDNSQuery(singleQuery, resolver)
-			if err != nil {
-				fmt.Println("Error forwarding DNS query:", err)
-				return
-			}
-			responses = append(responses, response)
-		}
-		mergedResponse := mergeResponses(responses, queryHeader.ID)
-		conn.WriteToUDP(mergedResponse, source)
-	} else {
-		// Forward single question query
-		response, err := forwardDNSQuery(query, resolver)
-		if err != nil {
-			fmt.Println("Error forwarding DNS query:", err)
-			return
-		}
-		// Ensure the response has the same ID as the original query
-		binary.BigEndian.PutUint16(response[:2], queryHeader.ID)
-		conn.WriteToUDP(response, source)
-	}
-}
-
-func mergeResponses(responses [][]byte, originalID uint16) []byte {
-	if len(responses) == 0 {
-		return nil
-	}
-
-	mergedHeader := parseHeader(responses[0])
-	mergedHeader.ID = originalID
-	mergedHeader.QDCOUNT = 0
-	mergedHeader.ANCOUNT = 0
-
-	var mergedQuestions []DNSQuestion
-	var mergedAnswers []DNSResourceRecords
-
-	for _, response := range responses {
-		header := parseHeader(response)
-		questions := parseQuestions(response, header.QDCOUNT)
-		answers := parseAnswers(response, header.ANCOUNT)
-
-		mergedHeader.QDCOUNT += header.QDCOUNT
-		mergedHeader.ANCOUNT += header.ANCOUNT
-		mergedQuestions = append(mergedQuestions, questions...)
-		mergedAnswers = append(mergedAnswers, answers...)
-	}
-
-	mergedMessage := DNSMessage{
-		Header:          mergedHeader,
-		Questions:       mergedQuestions,
-		ResourceRecords: mergedAnswers,
-	}
-
-	return mergedMessage.serialize()
 }
 
 func getLabelLength(buf []byte) int {
