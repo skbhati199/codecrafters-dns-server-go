@@ -68,12 +68,12 @@ func dnsServer() {
 
 				ips, err := dns.Forwad(question.QName, os.Args[2])
 
-				// if err != nil {
-				//
-				// 	log.Println("Error trying to forward the request: ", err)
-				// 	log.Fatal("Error here is the question: ", question.QName)
-				//
-				// }
+				if err != nil {
+
+					log.Println("Error trying to forward the request: ", err)
+					log.Fatal("Error here is the question: ", question.QName)
+
+				}
 
 				for _, ip := range ips {
 					log.Println(ip)
