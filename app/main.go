@@ -35,7 +35,7 @@ func dnsServer() {
 
 		message := buf[:size]
 		// log.Printf("Received %d bytes from %s:\n", size, source)
-		dns.PrintMessage(message)
+		// dns.PrintMessage(message)
 
 		response := []byte{}
 
@@ -110,7 +110,7 @@ func dnsServer() {
 
 			// log.Fatal(len(answers))
 			response = dns.EncodeDNSMessage(receivedHeader, receivedQuestions, answers)
-			dns.PrintMessage(response)
+			// dns.PrintMessage(response)
 		}
 
 		_, err = udpConn.WriteToUDP(response, source)
