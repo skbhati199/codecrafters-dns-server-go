@@ -110,7 +110,7 @@ func dnsServer() {
 
 			// log.Fatal(len(answers))
 			response = dns.EncodeDNSMessage(receivedHeader, receivedQuestions, answers)
-			// dns.PrintMessage(response)
+			dns.PrintMessage(response)
 		}
 
 		_, err = udpConn.WriteToUDP(response, source)
