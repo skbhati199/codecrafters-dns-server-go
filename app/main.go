@@ -241,6 +241,74 @@ func main() {
 	}
 }
 
+func createSingleQuestionQuery(header DNSHeader, question DNSQuestion) []byte {
+	header.QDCOUNT = 1
+	dnsMessage := DNSMessage{
+		Header:    header,
+		Questions: []DNSQuestion{question},
+	}
+	return dnsMessage.serialize()
+}
+
+func parseAnswers(serializedBuf []byte, numAns uint16) []DNSResourceRecords {
+	var answerList []DNSResourceRecords
+	offset := 12 // Start after the header
+
+	// Skip questions
+	for i := uint16(0); i < parseHeader(serializedBuf).QDCOUNT; i++ {
+		for serializedBuf[offset] != 0 {
+			if (serializedBuf[offset] & 0xC0) == 0xC0 {
+				offset += 2
+				break
+			}
+			offset += int(serializedBuf[offset]) + 1
+		}
+		offset += 5 // 1 for null byte, 2 for TYPE, 2 for CLASS
+	}
+
+	for i := uint16(0); i < numAns; i++ {
+		name, nameLength := parseName(serializedBuf, offset)
+		offset += nameLength
+
+		answer := DNSResourceRecords{
+			Name:     name,
+			Type:     binary.BigEndian.Uint16(serializedBuf[offset : offset+2]),
+			Class:    binary.BigEndian.Uint16(serializedBuf[offset+2 : offset+4]),
+			TTL:      binary.BigEndian.Uint32(serializedBuf[offset+4 : offset+8]),
+			RDLength: binary.BigEndian.Uint16(serializedBuf[offset+8 : offset+10]),
+		}
+		offset += 10
+		answer.RData = serializedBuf[offset : offset+int(answer.RDLength)]
+		offset += int(answer.RDLength)
+
+		answerList = append(answerList, answer)
+	}
+
+	return answerList
+}
+
+func parseName(buf []byte, offset int) (string, int) {
+	startOffset := offset
+	var name string
+	for {
+		if buf[offset] == 0 {
+			offset++
+			break
+		}
+		if (buf[offset] & 0xC0) == 0xC0 {
+			pointer := int(binary.BigEndian.Uint16(buf[offset:offset+2]) & 0x3FFF)
+			pointedName, _ := parseName(buf, pointer)
+			name += pointedName
+			offset += 2
+			break
+		}
+		length := int(buf[offset])
+		name += string(buf[offset+1:offset+1+length]) + "."
+		offset += length + 1
+	}
+	return name, offset - startOffset
+}
+
 func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolver string) {
 	queryHeader := parseHeader(query)
 
@@ -257,8 +325,6 @@ func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolv
 			responses = append(responses, response)
 		}
 		mergedResponse := mergeResponses(responses, queryHeader.ID)
-		// Ensure the merged response has the same ID as the original query
-		binary.BigEndian.PutUint16(mergedResponse[:2], queryHeader.ID)
 		conn.WriteToUDP(mergedResponse, source)
 	} else {
 		// Forward single question query
@@ -279,7 +345,7 @@ func mergeResponses(responses [][]byte, originalID uint16) []byte {
 	}
 
 	mergedHeader := parseHeader(responses[0])
-	mergedHeader.ID = originalID // Use the original query ID
+	mergedHeader.ID = originalID
 	mergedHeader.QDCOUNT = 0
 	mergedHeader.ANCOUNT = 0
 
@@ -304,49 +370,6 @@ func mergeResponses(responses [][]byte, originalID uint16) []byte {
 	}
 
 	return mergedMessage.serialize()
-}
-
-func createSingleQuestionQuery(header DNSHeader, question DNSQuestion) []byte {
-	header.QDCOUNT = 1
-	dnsMessage := DNSMessage{
-		Header:    header,
-		Questions: []DNSQuestion{question},
-	}
-	return dnsMessage.serialize()
-}
-
-func parseAnswers(serializedBuf []byte, numAns uint16) []DNSResourceRecords {
-	var answerList []DNSResourceRecords
-	offset := 12 // Start after the header
-
-	// Skip questions
-	for i := uint16(0); i < parseHeader(serializedBuf).QDCOUNT; i++ {
-		for serializedBuf[offset] != 0 {
-			offset += int(serializedBuf[offset]) + 1
-		}
-		offset += 5 // 1 for null byte, 2 for TYPE, 2 for CLASS
-	}
-
-	for i := uint16(0); i < numAns; i++ {
-		name := parseLabel(serializedBuf[offset:], serializedBuf)
-		nameLength := getLabelLength(serializedBuf[offset:])
-		offset += nameLength
-
-		answer := DNSResourceRecords{
-			Name:     name,
-			Type:     binary.BigEndian.Uint16(serializedBuf[offset : offset+2]),
-			Class:    binary.BigEndian.Uint16(serializedBuf[offset+2 : offset+4]),
-			TTL:      binary.BigEndian.Uint32(serializedBuf[offset+4 : offset+8]),
-			RDLength: binary.BigEndian.Uint16(serializedBuf[offset+8 : offset+10]),
-		}
-		offset += 10
-		answer.RData = serializedBuf[offset : offset+int(answer.RDLength)]
-		offset += int(answer.RDLength)
-
-		answerList = append(answerList, answer)
-	}
-
-	return answerList
 }
 
 func getLabelLength(buf []byte) int {
