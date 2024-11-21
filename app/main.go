@@ -242,13 +242,13 @@ func main() {
 }
 
 func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolver string) {
-	dnsMessage := createNewDnsMessage(query)
-	
-	if dnsMessage.Header.QDCOUNT > 1 {
+	queryHeader := parseHeader(query)
+
+	if queryHeader.QDCOUNT > 1 {
 		// Handle multiple questions
 		responses := [][]byte{}
-		for _, question := range dnsMessage.Questions {
-			singleQuery := createSingleQuestionQuery(dnsMessage.Header, question)
+		for _, question := range parseQuestions(query, queryHeader.QDCOUNT) {
+			singleQuery := createSingleQuestionQuery(queryHeader, question)
 			response, err := forwardDNSQuery(singleQuery, resolver)
 			if err != nil {
 				fmt.Println("Error forwarding DNS query:", err)
@@ -256,7 +256,9 @@ func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolv
 			}
 			responses = append(responses, response)
 		}
-		mergedResponse := mergeResponses(responses)
+		mergedResponse := mergeResponses(responses, queryHeader.ID)
+		// Ensure the merged response has the same ID as the original query
+		binary.BigEndian.PutUint16(mergedResponse[:2], queryHeader.ID)
 		conn.WriteToUDP(mergedResponse, source)
 	} else {
 		// Forward single question query
@@ -265,25 +267,19 @@ func handleDNSQuery(conn *net.UDPConn, source *net.UDPAddr, query []byte, resolv
 			fmt.Println("Error forwarding DNS query:", err)
 			return
 		}
+		// Ensure the response has the same ID as the original query
+		binary.BigEndian.PutUint16(response[:2], queryHeader.ID)
 		conn.WriteToUDP(response, source)
 	}
 }
 
-func createSingleQuestionQuery(header DNSHeader, question DNSQuestion) []byte {
-	header.QDCOUNT = 1
-	dnsMessage := DNSMessage{
-		Header:    header,
-		Questions: []DNSQuestion{question},
-	}
-	return dnsMessage.serialize()
-}
-
-func mergeResponses(responses [][]byte) []byte {
+func mergeResponses(responses [][]byte, originalID uint16) []byte {
 	if len(responses) == 0 {
 		return nil
 	}
 
 	mergedHeader := parseHeader(responses[0])
+	mergedHeader.ID = originalID // Use the original query ID
 	mergedHeader.QDCOUNT = 0
 	mergedHeader.ANCOUNT = 0
 
@@ -308,6 +304,15 @@ func mergeResponses(responses [][]byte) []byte {
 	}
 
 	return mergedMessage.serialize()
+}
+
+func createSingleQuestionQuery(header DNSHeader, question DNSQuestion) []byte {
+	header.QDCOUNT = 1
+	dnsMessage := DNSMessage{
+		Header:    header,
+		Questions: []DNSQuestion{question},
+	}
+	return dnsMessage.serialize()
 }
 
 func parseAnswers(serializedBuf []byte, numAns uint16) []DNSResourceRecords {
