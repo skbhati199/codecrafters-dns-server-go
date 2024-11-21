@@ -26,24 +26,29 @@ type DNSHeader struct {
 	nscount uint16
 	arcount uint16
 }
+
 type DNSFlag [2]byte
 
 func NewDNSFlag() DNSFlag {
 	return [2]byte{}
 }
+
 func (f *DNSFlag) SetQR(v int) {
 	if v != 0 {
 		v = 1
 	}
 	f[0] = (f[0] & ^qrMask) | (byte(v) * qrMask)
 }
+
 func (f *DNSFlag) Opcode() uint8 {
 	return f[0] & opcodeMask >> 3
 }
+
 func (f *DNSFlag) SetOpcode(code uint8) {
 	code = code & 15
 	f[0] = (f[0] & ^opcodeMask) | (code << 3)
 }
+
 func (f *DNSFlag) RD() int {
 	v := f[0] & rdMask
 	if v != 0 {
@@ -51,22 +56,25 @@ func (f *DNSFlag) RD() int {
 	}
 	return 0
 }
+
 func (f *DNSFlag) SetRD(v int) {
 	if v != 0 {
 		v = 1
 	}
 	f[0] = (f[0] & ^rdMask) | (byte(v) * rdMask)
 }
+
 func (f *DNSFlag) SetRCode(code uint8) {
 	code = code & 15
 	f[1] = (f[1] & ^rcodeMask) | byte(code)
 }
+
 func NewDNSHeader(data []byte) *DNSHeader {
 	hdr := &DNSHeader{
 		id:      toUint16(data[0:2]),
 		qdcount: toUint16(data[4:6]),
 		ancount: toUint16(data[6:8]),
-		nscount: toUint16(data[8:12]),
+		nscount: toUint16(data[8:10]),
 		arcount: toUint16(data[10:12]),
 	}
 	copy(hdr.flags[:], data[2:4])
@@ -110,6 +118,7 @@ func NewDNSQuestion(start int, data []byte) (*DNSQuestion, int) {
 		i = i + l
 	}
 }
+
 func (q *DNSQuestion) AsBytes() []byte {
 	var bs []byte
 	for _, l := range q.labels {
@@ -155,12 +164,15 @@ type DNSMessage struct {
 func toUint16(bs []byte) uint16 {
 	return uint16(bs[0])<<8 | uint16(bs[1])
 }
+
 func fromUint16(n uint16) []byte {
 	return []byte{byte(n >> 8), byte(n & 255)}
 }
+
 func fromUint32(n uint32) []byte {
 	return []byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n & 255)}
 }
+
 func NewDNSMessage(data []byte) (*DNSMessage, error) {
 	if len(data) < hdrSize {
 		return nil, fmt.Errorf("message is too short")
@@ -176,6 +188,7 @@ func NewDNSMessage(data []byte) (*DNSMessage, error) {
 		qs:  qs,
 	}, nil
 }
+
 func (m *DNSMessage) AsBytes() []byte {
 	b := make([]byte, hdrSize)
 	copy(b[0:2], fromUint16(m.hdr.id))
@@ -192,19 +205,15 @@ func (m *DNSMessage) AsBytes() []byte {
 	}
 	return b
 }
+
 func handle(resolver *net.Resolver, req *DNSMessage) (*DNSMessage, error) {
-	fmt.Printf("%08b", req.hdr.flags[0])
-	fmt.Printf("%08b", req.hdr.flags[1])
 	flag := NewDNSFlag()
 	flag.SetQR(1)
 	flag.SetOpcode(req.hdr.flags.Opcode())
-	fmt.Println(req.hdr.flags.RD())
 	flag.SetRD(req.hdr.flags.RD())
 	if req.hdr.flags.Opcode() != 0 {
 		flag.SetRCode(4)
 	}
-	fmt.Printf("%08b", flag[0])
-	fmt.Printf("%08b", flag[1])
 
 	var rrs []*ResourceRecord
 	for _, q := range req.qs {
@@ -215,7 +224,7 @@ func handle(resolver *net.Resolver, req *DNSMessage) (*DNSMessage, error) {
 				class: 1,
 				ttl:   60,
 				rdlen: 4,
-				rdata: []byte{byte(8), byte(8), byte(8), byte(8)},
+				rdata: []byte{8, 8, 8, 8},
 			})
 			continue
 		}
@@ -230,7 +239,7 @@ func handle(resolver *net.Resolver, req *DNSMessage) (*DNSMessage, error) {
 				class: 1,
 				ttl:   60,
 				rdlen: 4,
-				rdata: []byte(ip.IP),
+				rdata: ip.IP.To4(),
 			})
 		}
 	}
@@ -248,6 +257,7 @@ func handle(resolver *net.Resolver, req *DNSMessage) (*DNSMessage, error) {
 	}
 	return m, nil
 }
+
 func main() {
 	ns := flag.String("resolver", "", "Resolver address")
 	flag.Parse()
