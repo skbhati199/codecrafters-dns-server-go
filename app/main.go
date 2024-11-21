@@ -35,7 +35,7 @@ func dnsServer() {
 
 		message := buf[:size]
 		// log.Printf("Received %d bytes from %s:\n", size, source)
-		// dns.PrintMessage(message)
+		dns.PrintMessage(message)
 
 		response := []byte{}
 
